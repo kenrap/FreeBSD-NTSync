@@ -1,5 +1,4 @@
 # FreeBSD-NTSync
-FreeBSD NTSync kernel driver for use with Windows compatibility layers.
-Tested with FreeBSD 15
+FreeBSD 15+ NTSync kernel driver for use with Windows compatibility layers.
 
-**AI Disclosure:** AI agents were used to assist with development.
+**AI Disclosure:** _AI agents were used to assist with development._
