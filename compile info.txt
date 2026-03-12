@@ -1,0 +1,25 @@
+# make COMPAT32=yes
+# sudo make install
+# make clean
+# sudo kldload ntsync
+
+# cc -pthread -O2 -Wall -Wextra -I/usr/local/include ntsync_full_multithreaded_test.c -o ntsync_full_multithreaded_test
+# ./ntsync_full_test
+
+# cc -O2 -Wall -Wextra -I/usr/local/include ntsync_create_wait.c -o ntsync_create_wait
+# ./ntsync_create_wait
+
+# cc -O2 -Wall -Wextra -I/usr/local/include ntsync_full_test.c -o ntsync_full_test
+# ./ntsync_full_test
+
+# cc -O2 -Wall -Wextra -I/usr/local/include ntsync_test.c -o ntsync_test
+# ./ntsync_test
+
+# cc -O2 -Wall -Wextra -I/usr/local/include ioctl_test.c -o ioctl_test
+# ./ioctl_test
+
+# WINEDEBUG=+sync,+server wine wineboot 2>&1 | head -200 &> winelog.txt
+# sudo ktrace -f ktrace.out ./ntsync_full_test
+# sudo kdump -f ktrace.out > kdump.txt
+# sudo procstat -k <child-pid>
+# procstat -t <child-pid>
