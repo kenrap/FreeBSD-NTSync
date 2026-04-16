@@ -24,7 +24,7 @@
 #include <sys/ioctl.h>
 #include <inttypes.h>
 
-#include "ntsync.h"
+#include "linux/ntsync.h"
 
 int main(int argc, char **argv)
 {

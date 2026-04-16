@@ -32,7 +32,7 @@
 #include <sys/ioctl.h>
 #include <inttypes.h>
 
-#include "ntsync.h"
+#include "linux/ntsync.h"
 
 /* ------------------------------------------------------------------ */
 /* Helpers                                                              */

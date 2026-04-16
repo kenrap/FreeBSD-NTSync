@@ -31,7 +31,7 @@
 #include <time.h>
 #include <stdatomic.h>
 
-#include "ntsync.h"
+#include "linux/ntsync.h"
 
 /* ========================================================================
  * Global test state
