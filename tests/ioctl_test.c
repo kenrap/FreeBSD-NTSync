@@ -7,7 +7,7 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <string.h>
-#include "ntsync.h"
+#include "linux/ntsync.h"
 
 int main(void)
 {

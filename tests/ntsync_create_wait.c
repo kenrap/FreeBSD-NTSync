@@ -7,7 +7,7 @@
 #include <sys/syscall.h>
 #include <string.h>
 #include <errno.h>
-#include "ntsync.h"
+#include "linux/ntsync.h"
 
 int main(void)
 {
