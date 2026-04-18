@@ -1,6 +1,7 @@
-PORTNAME=	ntsync-kmod
+PORTNAME=	ntsync
 DISTVERSION=	g20260416
 CATEGORIES=	emulators
+PKGNAMESUFFIX=	-kmod
 
 MAINTAINER=	tmp386@live.com
 COMMENT=	NTSync kernel driver for Windows compatibility layers
@@ -9,7 +10,7 @@ WWW=		https://github.com/XaeroVincent/FreeBSD-NTSync
 LICENSE=	GPLv2
 LICENSE_FILE=	${WRKSRC}/LICENSE
 
-USES=		compiler:c11 kmod
+USES=		kmod
 
 USE_GITHUB=	yes
 GH_ACCOUNT=	XaeroVincent
