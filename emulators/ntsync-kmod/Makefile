@@ -21,7 +21,8 @@ MAKE_ARGS=	COMPAT32=yes
 PLIST_FILES=	${KMODDIR}/ntsync.ko \
 		include/linux/ntsync.h
 
-post-install:
+do-install:
+	${INSTALL_KLD} ${WRKSRC}/ntsync.ko ${STAGEDIR}${KMODDIR}
 	${MKDIR} ${STAGEDIR}${PREFIX}/include/linux
 	${INSTALL_DATA} ${WRKSRC}/ntsync.h ${STAGEDIR}${PREFIX}/include/linux
 
