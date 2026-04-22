@@ -16,11 +16,11 @@ build_tests() {
 }
 
 run_tests() {
-    ${PWD}/bin/ntsync_full_multithreaded_test /dev/ntsync
-    ${PWD}/bin/ntsync_create_wait
-    ${PWD}/bin/ntsync_full_test
-    ${PWD}/bin/ntsync_test
     ${PWD}/bin/ioctl_test
+    ${PWD}/bin/ntsync_create_wait
+    ${PWD}/bin/ntsync_test /dev/ntsync
+    ${PWD}/bin/ntsync_full_test /dev/ntsync
+    ${PWD}/bin/ntsync_full_multithreaded_test /dev/ntsync
 }
 
 run_debug() {
