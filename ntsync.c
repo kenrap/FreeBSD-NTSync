@@ -660,10 +660,22 @@ ntsync_obj_unref(struct ntsync_obj *obj)
             ntsync_try_wake_all_obj(dev, obj);
         }
         ntsync_try_wake_any_obj(obj);
-        ntsync_obj_notify(obj);
-        mtx_unlock(&obj->mtx);
+        /*
+         * Release wait_all_mtx before calling ntsync_obj_notify.
+         * ntsync_obj_notify calls selwakeup() which acquires selhash_lock
+         * internally, and KNOTE_LOCKED which holds obj->mtx.  Holding
+         * wait_all_mtx at that point establishes the ordering:
+         *   wait_all_mtx -> obj->mtx -> selhash_lock
+         * — a three-level chain that creates a deadlock hazard for any
+         * kernel code that holds selhash_lock while acquiring a device
+         * lock.  Release wait_all_mtx first to limit the ordering to
+         *   obj->mtx -> selhash_lock
+         * which is consistent with the selrecord path in ntsync_obj_poll.
+         */
         if (dev != NULL)
             mtx_unlock(&dev->wait_all_mtx);
+        ntsync_obj_notify(obj);
+        mtx_unlock(&obj->mtx);
         knlist_destroy(&obj->knlist);
         seldrain(&obj->selinfo);
         cv_destroy(&obj->waiters_cv);
@@ -1380,11 +1392,25 @@ ntsync_schedule(struct ntsync_q *q, const struct ntsync_wait_args *args)
             }
         }
     }
-    /* capture aborted state before unlocking */
-    bool aborted = q->aborted;
+    /*
+     * Capture both state fields while q->lock is still held.
+     *
+     * Reading q->signaled after mtx_unlock is racy: a concurrent
+     * ntsync_obj_close can call ntsync_q_signal_deleted in the window
+     * between the unlock and the if-check below.  ntsync_q_signal_deleted
+     * acquires q->lock, sees q->signaled == -1 (we broke out of the loop
+     * due to EINTR without the object being signaled), and sets q->signaled
+     * to a non-(-1) value.  The subsequent unlocked read then sees a
+     * signaled queue and returns 0 or ETIMEDOUT instead of EINTR, silently
+     * swallowing the Unix signal.  For Wine this suppresses APC delivery
+     * until the next wait.  Capture was_signaled under the lock to close
+     * the race.
+     */
+    bool aborted      = q->aborted;
+    bool was_signaled = (q->signaled != -1);
     mtx_unlock(&q->lock);
 
-    if (q->signaled != -1) {
+    if (was_signaled) {
         if (aborted)
             return (ETIMEDOUT);
         return (0);
@@ -2079,11 +2105,13 @@ ntsync_sem_release(struct ntsync_obj *sem, void *uarg)
         if (need_all)
             ntsync_try_wake_all_obj(dev, sem);
         ntsync_try_wake_any_sem(sem);
-        ntsync_obj_notify(sem);
     }
-    mtx_unlock(&sem->mtx);
+    /* Release wait_all_mtx before notify; see ntsync_obj_unref. */
     if (need_all)
         mtx_unlock(&dev->wait_all_mtx);
+    if (error == 0)
+        ntsync_obj_notify(sem);
+    mtx_unlock(&sem->mtx);
 
     if (error == 0) {
         if (ntsync_kern_copyout(&prev, uarg, sizeof(prev)) != 0)
@@ -2149,11 +2177,13 @@ ntsync_mutex_unlock(struct ntsync_obj *mutex, void *uarg)
         if (need_all)
             ntsync_try_wake_all_obj(dev, mutex);
         ntsync_try_wake_any_mutex(mutex);
-        ntsync_obj_notify(mutex);
     }
-    mtx_unlock(&mutex->mtx);
+    /* Release wait_all_mtx before notify; see ntsync_obj_unref. */
     if (need_all)
         mtx_unlock(&dev->wait_all_mtx);
+    if (error == 0)
+        ntsync_obj_notify(mutex);
+    mtx_unlock(&mutex->mtx);
 
     if (error == 0) {
         /* Copy the single count field back to user space using helper. */
@@ -2193,11 +2223,13 @@ ntsync_mutex_kill(struct ntsync_obj *mutex, void *uarg)
         if (need_all)
             ntsync_try_wake_all_obj(dev, mutex);
         ntsync_try_wake_any_mutex(mutex);
-        ntsync_obj_notify(mutex);
     }
-    mtx_unlock(&mutex->mtx);
+    /* Release wait_all_mtx before notify; see ntsync_obj_unref. */
     if (need_all)
         mtx_unlock(&dev->wait_all_mtx);
+    if (error == 0)
+        ntsync_obj_notify(mutex);
+    mtx_unlock(&mutex->mtx);
     return (error);
 }
 
@@ -2257,13 +2289,16 @@ ntsync_event_set_reset(struct ntsync_obj *event, void *uarg, bool set, bool puls
         if (need_all)
             ntsync_try_wake_all_obj(dev, event);
         ntsync_try_wake_any_event(event);
+    }
+    /* Release wait_all_mtx before notify; see ntsync_obj_unref. */
+    if (need_all)
+        mtx_unlock(&dev->wait_all_mtx);
+    if (set) {
         ntsync_obj_notify(event);
         if (pulse)
             event->u.event.signaled = false;
     }
     mtx_unlock(&event->mtx);
-    if (need_all)
-        mtx_unlock(&dev->wait_all_mtx);
 
     if (ntsync_kern_copyout(&prev, uarg, sizeof(prev)) != 0)
         error = EFAULT;
@@ -2448,28 +2483,47 @@ ntsync_obj_close(struct file *fp, struct thread *td)
         TAILQ_FOREACH_SAFE(entry, &obj->all_waiters, link, tmp)
             if (entry->q != NULL)
                 ntsync_q_signal_deleted(entry->q, entry->index);
-        ntsync_obj_notify(obj);
 
+        /*
+         * Release wait_all_mtx before calling ntsync_obj_notify.
+         * See the matching comment in ntsync_obj_unref for the full
+         * rationale.  The drain loop below only uses obj->mtx, so
+         * releasing wait_all_mtx here is safe.
+         */
         if (dev != NULL)
             mtx_unlock(&dev->wait_all_mtx);
+        ntsync_obj_notify(obj);
 
         /*
          * Wait for active waiters to drain.  Waiters increment
          * obj->active_waiters when they register and decrement it when
          * they unregister.  We hold obj->mtx throughout.
          *
-         * Use cv_timedwait with a 5-second deadline instead of the
-         * original unbounded cv_wait.  In correct operation the drain
-         * completes in microseconds (the abort/wakeup path guarantees
-         * every sleeper calls cv_signal on their q->cv, wakes, removes
-         * itself from the waiter list, and decrements active_waiters
-         * before touching anything else).  The timeout guards against a
-         * future bug where a waiter fails to decrement active_waiters,
-         * which would otherwise hang the closing thread permanently with
-         * no way to interrupt it — even SIGKILL cannot deliver while
-         * sleeping in cv_wait.  If the drain stalls we emit a warning and
-         * a KASSERT so INVARIANTS kernels catch the regression; in
-         * production builds we break out rather than hang forever.
+         * Use cv_timedwait with a 5-second deadline.  In correct operation
+         * the drain completes in microseconds: ntsync_q_signal_deleted (called
+         * above) sets q->signaled and calls cv_signal(&q->cv); the sleeping
+         * waiter wakes, exits ntsync_schedule, removes itself from the waiter
+         * lists under obj->mtx (released by cv_timedwait while we sleep), and
+         * decrements active_waiters before calling cv_signal(&obj->waiters_cv).
+         *
+         * If the drain times out, a kernel bug has prevented a waiter from
+         * completing its teardown.  We break out and let fo_close return so
+         * the closing process can be killed; leaving it permanently stuck in
+         * an uninterruptible D-state is worse than the alternative.
+         *
+         * Breaking out with active_waiters > 0 is safe for memory: the stuck
+         * waiter still holds a ntsync_get_obj reference on this object, so
+         * ntsync_obj_drop below only drops the fd's reference (refcnt 2→1)
+         * and does not free the object.  When the waiter eventually completes
+         * (e.g. its thread is killed and cv_wait_sig returns EINTR), it will
+         * decrement active_waiters, call ntsync_obj_drop (refcnt 1→0), and
+         * call uma_zfree, draining ntsync_active_q_count naturally.
+         *
+         * The uma_zdestroy panic risk is eliminated by the companion change
+         * in MOD_UNLOAD: if ntsync_active_q_count is still nonzero after the
+         * 5-second poll, MOD_UNLOAD now returns EBUSY instead of proceeding
+         * with uma_zdestroy, so the zone is never destroyed while live
+         * ntsync_q allocations exist.
          */
         {
             int _drain_iter = 0;
@@ -2834,9 +2888,36 @@ ntsync_modevent(module_t mod, int type, void *data)
             for (int _i = 0; _i < 500 &&
                 counter_u64_fetch(ntsync_active_q_count) != 0; _i++)
                 pause("ntsyncunld", hz / 100);
-            if (counter_u64_fetch(ntsync_active_q_count) != 0)
+            if (counter_u64_fetch(ntsync_active_q_count) != 0) {
+                /*
+                 * One or more waiter threads are still executing their
+                 * teardown path (holding a live ntsync_q from the zone).
+                 * This happens when ntsync_obj_close's drain timed out and
+                 * broke out with active_waiters > 0: the stuck waiter still
+                 * holds its ntsync_q and will call uma_zfree once it
+                 * eventually completes.
+                 *
+                 * Calling uma_zdestroy now would free the zone's backing
+                 * slabs while those ntsync_q allocations are still live,
+                 * causing a kernel panic the next time the waiter touches
+                 * its q pointer.  Refuse the unload instead; the module
+                 * will remain loaded until the stuck waiters drain naturally
+                 * (e.g. the stuck thread is killed and cv_wait_sig returns
+                 * EINTR), at which point uma_zfree is called and
+                 * ntsync_active_q_count reaches zero.
+                 */
                 printf("ntsync: WARNING: active waiter(s) at unload -- "
-                    "zone destroy may panic\n");
+                    "refusing unload to prevent zone-destroy panic\n");
+                /*
+                 * Undo the module-reference drop and device teardown that
+                 * already happened above.  We cannot restore them cleanly;
+                 * the safest recovery is to indicate EBUSY so the module
+                 * loader leaves the module in place.  The operator should
+                 * wait for the stuck waiters to complete (or kill the
+                 * blocked processes) and retry kldunload.
+                 */
+                return (EBUSY);
+            }
             uma_zdestroy(ntsync_q_zone);
             ntsync_q_zone = NULL;
         }
